@@ -1,83 +1,83 @@
-#  PII Redactor Tool
+# PII Redactor Tool
 
-This tool scans and redacts Personally Identifiable Information (PII) from CSV files. It uses a combination of regular expressions and spaCy's Named Entity Recognition (NER) to clean sensitive content from customer support data.
+This tool scans and redacts Personally Identifiable Information (PII) from structured and unstructured documents using NLP and Regex.
 
-##  Features
+## Supports:
+- CSV
+- Plain text
+- Word documents (`.docx`)
+- HTML files
 
--  Detects and redacts:
+## Features
+
+- Detects and redacts:
   - Emails
-  - Phone numbers
-  - Addresses
-  - Tokens & IDs
-  - Names and organizations (via spaCy NER)
--  Keeps a redaction log for review
--  Supports:
-  - Single file mode: `input.csv`
-  - Batch mode: processes all `.csv` files in the current folder
+  - API tokens / access keys
+  - Named Entities: PERSON, ORG, GPE (via spaCy)
+- Preserves formatting (in `.docx` and `.html`)
+- Uses whitelist-based filtering (to avoid false positives like `Qlik Sense`)
+- Redaction log per file (shows what was removed and why)
 
-##  Quick Start
+## Supported Input Modes
 
-### 1. Clone or download the project
+- Redact a single file:
+  ```bash
+  python pii_remove.py myfile.csv
+  ```
+
+- Redact all supported files in the current folder:
+  ```bash
+  python pii_remove.py
+  ```
+
+- Redact a specific folder:
+  ```bash
+  python pii_remove.py /path/to/mydata
+  ```
+
+## Output
+
+For every input file:
+- `myfile__redacted.csv|.docx|.html|.txt`
+- `myfile__redaction_log.txt` — includes entity types and redacted content
+
+## Technology Used
+
+- `spaCy` – Named Entity Recognition
+- `nltk` – English vocabulary filtering
+- `re` – Email, token pattern detection
+- `python-docx` – Modify `.docx` files while preserving layout
+- `BeautifulSoup` – Clean HTML while keeping structure
+- `pandas` – Parse `.csv` efficiently
+
+## Setup
 
 ```bash
+# Clone repo
 git clone https://github.com/igindin10/PII_remover.git
 cd PII_remover
-```
 
-Or unzip the provided archive.
-
-### 2. Create a virtual environment (optional but recommended)
-
-```bash
+# (Optional) Create virtual environment
 python -m venv venv
-source venv/bin/activate      # On Windows: venv\Scripts\activate
-```
+source venv/bin/activate   # Windows: venv\Scripts\activate
 
-### 3. Install dependencies
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
+
+# Download the spaCy model
+python -m spacy download en_core_web_sm
 ```
 
-### 4. Register the spaCy model
+## Notes
 
-```bash
-python -m spacy link en_core_web_sm en_core_web_sm
-```
-
-> This step ensures spaCy can load the model by name.
-
-##  How to Use
-
-### Option 1: Redact a single CSV file
-
-```bash
-python pii_remove.py yourfile.csv
-```
-
-### Option 2: Redact all `.csv` files in the current directory
-
-```bash
-python pii_remove.py
-```
-
-##  Output
-
-For each input CSV, you'll get:
-
--  `yourfile__redacted.csv` — cleaned version  
--  `yourfile__redaction_log.txt` — what was redacted
-
-##  Notes
-
-- This version uses `en_core_web_sm` — fast and good for demo/Hackathon purposes.
-- For more accurate redaction, consider upgrading to `en_core_web_trf` (requires PyTorch).
-- The tool assumes well-formed CSV files encoded in UTF-8.
-
-## License
-
-This project is intended for internal demo/hackathon use only. Not production-hardened.
+- Model: `en_core_web_sm` (can be upgraded to `en_core_web_trf` for production)
+- Not production-hardened. Designed for Hackathon/demos.
+- False positives minimized with tech-term filtering logic.
 
 ## Authors
 
-- Maintainer: Igor Gindin
+Maintainer: Igor Gindin
+
+## License
+
+For internal hackathon/demo purposes only.
