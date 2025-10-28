@@ -13,6 +13,7 @@ from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, PatternRecogni
 from presidio_analyzer.nlp_engine import SpacyNlpEngine
 from presidio_anonymizer import AnonymizerEngine, OperatorConfig
 from wordfreq import zipf_frequency
+from pdfminer.high_level import extract_text
 
 
 class InternationalPhoneNumberRecognizer(PatternRecognizer):
@@ -100,7 +101,7 @@ ANONYMIZER_OPERATORS = {
 INPUT_PATH = sys.argv[1] if len(sys.argv) > 1 else "."
 OUTPUT_DIR = "redacted"
 LOG_DIR = "logs"
-SUPPORTED_EXTENSIONS = [".txt", ".csv", ".html", ".htm", ".docx"]
+SUPPORTED_EXTENSIONS = [".txt", ".csv", ".html", ".htm", ".docx", "pdf"]
 
 RE_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 RE_TOKEN = re.compile(r"[a-zA-Z0-9]{10,}[.!][a-zA-Z0-9._-]{5,}[.!][a-zA-Z0-9._-]{5,}")
@@ -385,6 +386,14 @@ def process_docx(file_path_doc: Path, out_path: Path, log_path: Path):
     doc.save(str(out_path))
     write_log(log, log_path)
 
+def process_pdf_to_txt(file_path_pdf: Path, out_path: Path, log_path: Path):
+    log = []
+    text = extract_text(file_path_pdf)
+    redacted = redact_text(text, log)
+    out_path = out_path.with_suffix(".txt")
+    save_redacted_text(redacted, out_path)
+    write_log(log, log_path)
+
 def write_log(log_entries, log_path):
     def _mask_for_log(x: str) -> str:
         h = hashlib.sha256(x.encode("utf-8")).hexdigest()[:8]
@@ -423,6 +432,8 @@ for file_path in files:
             process_html(file_path, out_file, log_file)
         elif ext == ".docx":
             process_docx(file_path, out_file, log_file)
+        elif ext == ".pdf":
+            process_pdf_to_txt(file_path, out_file, log_file)
         print(f"Redacted: {file_path.name}")
     except Exception as e:
         print(f"Error processing {file_path.name}: {e}")
