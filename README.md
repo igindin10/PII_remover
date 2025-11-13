@@ -1,3 +1,5 @@
+# (OUT OF DATE, will be updated)
+
 # PII Redactor Tool
 
 This tool scans and redacts Personally Identifiable Information (PII) from structured and unstructured documents using NLP and Regex.
