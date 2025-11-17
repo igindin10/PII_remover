@@ -82,7 +82,7 @@ REDACT_ENTITIES = [
     # Can be added more as needed
 ]
 
-ANALYZER_THRESHOLD = 0.7
+ANALYZER_THRESHOLD = 0.4
 
 #Anonymizer operators
 ANONYMIZER_OPERATORS = {
