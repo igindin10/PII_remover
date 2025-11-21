@@ -18,11 +18,26 @@ from pdfminer.high_level import extract_text
 
 class InternationalPhoneNumberRecognizer(PatternRecognizer):
     def __init__(self):
-        # A permissive regex pattern to catch various international phone formats
-        # Matches +<digits> with optional spaces, dashes, or parentheses
+        """
+        A recognizer specialized for US phone numbers.
+
+        It detects:
+        - +1XXXXXXXXXX (E.164 international US format)
+        - (xxx) xxx-xxxx
+        - xxx-xxx-xxxx
+        - xxx xxx xxxx
+        - xxxxxxxxxx
+
+        And rejects:
+        - +44... (UK)
+        - +972... (Israel)
+        - +49... (Germany)
+        - short numeric sequences
+        - ambiguous "20 25 55" style patterns
+        """
         pattern = Pattern(
-            name="international_phone_number",
-            regex=r"\+?\d{1,3}[\s.-]?\d{1,3}[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)",
+            name="international_us_number",
+            regex=r"(?:\+1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})",
             score=0.7
         )
         super().__init__(
@@ -30,17 +45,46 @@ class InternationalPhoneNumberRecognizer(PatternRecognizer):
             patterns=[pattern]
         )
 
-    def validate_result(self, pattern_text: str) -> bool:
+    def validate_result(self, text: str) -> bool:
         """
-        Overrides the default validator to use the phonenumbers library.
-        Returns True only if phonenumbers.is_valid_number() passes.
+        Only accept:
+        - valid +1 E.164 numbers
+        - valid US national-format numbers
+        Reject everything else.
         """
-        try:
-            # Try to parse the number with no region bias (None)
-            num = phonenumbers.parse(pattern_text, None)
-            return phonenumbers.is_valid_number(num)
-        except Exception:
+        text = text.strip()
+
+        if not any(c.isdigit() for c in text):
             return False
+
+        # If number starts with "+1", parse as E.164 first
+        if text.startswith("+1"):
+            try:
+                # Try to parse the number with no region bias (None)
+                num = phonenumbers.parse(text, None)
+                return phonenumbers.is_valid_number(num) and num.country_code == 1
+            except phonenumbers.NumberParseException:
+                # Just skip to next validation layer
+                pass
+
+        # National US parsing
+        try:
+            num_us = phonenumbers.parse(text, "US")
+            if phonenumbers.is_valid_number(num_us):
+                return True
+        except phonenumbers.NumberParseException:
+            # Not a valid US national format; try other parsing options
+            pass
+
+        # Try E.164 again with no region (for robustness), but accept ONLY US
+        try:
+            num_global = phonenumbers.parse(text, None)
+            if phonenumbers.is_valid_number(num_global):
+                return num_global.country_code == 1
+        except phonenumbers.NumberParseException:
+            return False
+
+        return False
 
 
 
