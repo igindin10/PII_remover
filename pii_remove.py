@@ -1,4 +1,7 @@
+from collections import Counter
 import hashlib
+import ipaddress
+import tempfile
 import re
 import string
 import sys
@@ -9,7 +12,10 @@ import phonenumbers
 from bs4 import BeautifulSoup, Comment
 from bs4.element import AttributeValueList
 from docx import Document
-from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, PatternRecognizer, Pattern
+from presidio_analyzer import (
+    AnalyzerEngine, EntityRecognizer, Pattern, PatternRecognizer,
+    RecognizerRegistry, RecognizerResult,
+)
 from presidio_analyzer.nlp_engine import SpacyNlpEngine
 from presidio_anonymizer import AnonymizerEngine, OperatorConfig
 from wordfreq import zipf_frequency
@@ -145,7 +151,7 @@ ANONYMIZER_OPERATORS = {
 INPUT_PATH = sys.argv[1] if len(sys.argv) > 1 else "."
 OUTPUT_DIR = "redacted"
 LOG_DIR = "logs"
-SUPPORTED_EXTENSIONS = [".txt", ".csv", ".html", ".htm", ".docx", "pdf"]
+SUPPORTED_EXTENSIONS = [".txt", ".csv", ".html", ".htm", ".docx", "pdf", ".log"]
 
 RE_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 RE_TOKEN = re.compile(r"[a-zA-Z0-9]{10,}[.!][a-zA-Z0-9._-]{5,}[.!][a-zA-Z0-9._-]{5,}")
@@ -163,6 +169,139 @@ FALSE_POSITIVE_PERSONS = {s.lower() for s in {
     "email", "reason", "loading", "workbook", "status", "owner", "assigned",
     "priority", "default", "total", "value", "name", "user", "users"
 }}
+
+
+# Quoted, ODBC brace-delimited, or unquoted field values.
+VALUE = r'''"(?:\\.|""|[^"\\\r\n])*"|'(?:\\.|''|[^'\\\r\n])*'|\{(?:\}\}|[^}\r\n])*\}|[^\s;,<>"'\[\]{}]+'''
+
+
+def fields(keys, allow_unquoted=True):
+    # Also accepts quoted JSON keys.
+    value = VALUE if allow_unquoted else VALUE.rsplit("|", 1)[0]
+    return rf'''(?P<prefix>(?<![\w-])(?:{keys})["']?[ \t]*[:=][ \t]*)(?P<value>{value})'''
+
+
+LOG_RULES = tuple(
+    (label, re.compile(pattern, re.IGNORECASE))
+    for label, pattern in (
+        ("SECRET", fields(r"password|passwd|pwd|secret|client[_-]?secret|"
+                          r"(?:access[_-]?|refresh[_-]?|session[_-]?)token|"
+                          r"api[_-]?key|aws[_-]?secret[_-]?access[_-]?key")),
+        ("SECRET", r'''(?P<prefix>\bauthorization["']?[ \t]*:[ \t]*["']?(?:bearer|basic)[ \t]+)(?P<value>[A-Za-z0-9._~+/=-]+)'''),
+        ("SECRET", r"(?P<value>\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)"),
+        ("HOST", r'''(?P<prefix>\b[a-z][a-z0-9+.-]*://)(?P<value>[^/\s?#<>"']+)'''),
+        ("URL_QUERY", r'''(?P<prefix>\b[a-z][a-z0-9+.-]*://[^?\s#<>"']*\?)(?P<value>[^\s<>"']+)'''),
+        ("USER", fields(r"user(?:[ _-]?(?:name|id))?|uid|login(?:[ _-]?name)?")),
+        ("PERSON", fields(r"full[ _-]?name|contact[ _-]?name", allow_unquoted=False)),
+        ("PERSON", r'''(?P<prefix>\b(?:full[ _-]?name|contact[ _-]?name)["']?[ \t]*[:=][ \t]*)(?P<value>(?![\[{"\x27])[^\r\n;,]+?)(?=[ \t]+[\w-]+[ \t]*[:=]|[ \t]*(?:[;,]|$))'''),
+        ("PHONE", r'''(?P<prefix>\b(?:phone(?:[ _-]?number)?|mobile|tel)["']?[ \t]*[:=][ \t]*["']?)(?P<value>\+?\(?\d[\d(). -]{5,}\d)'''),
+        ("HOST", fields(r"host(?:[ _-]?name)?|server(?:[ _-]?name)?|data[ _-]?source")),
+        ("HOST", rf"(?P<prefix>\brunning on host[ \t]+)(?P<value>{VALUE})"),
+        ("DATABASE", fields(r"database(?:[ _-]?name)?|initial[ _-]?catalog")),
+        ("LICENSEE", r"(?P<prefix>\bLicensed to[ \t]+)(?P<value>[^\r\n]+?)(?=,[ \t]*(?:term|evaluation|perpetual|subscription) license\b)"),
+        ("BUCKET", r'''(?P<prefix>\bS3 bucket[ \t]+)(?P<value>"[^"\r\n]+"|'[^'\r\n]+')'''),
+        ("USER", r'''(?P<prefix>\b[A-Z]:[\\/]Users[\\/]|/(?:home|Users)/)(?P<value>[^/\\\s"';<>]+)'''),
+        ("EMAIL", r"(?P<value>[\w.!#$%&'*+/=?^\x60{|}~-]+@[\w.-]+\.[^\W\d_]{2,})"),
+        ("US_SSN", r"(?P<value>(?<![\w-])\d{3}-\d{2}-\d{4}(?![\w-]))"),
+    )
+)
+IP_CANDIDATE = re.compile(
+    r"(?<![\w.:])(?:"
+    r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?!\w|\.[0-9])"
+    r"|(?:[0-9a-f]{0,4}:){2,}[0-9a-f:.]*(?:%[\w.-]+)?(?![\w:])"
+    r")", re.IGNORECASE
+)
+
+
+LOG_PREFIX = re.compile(
+    r"^\d+: \d{4}-\d\d-\d\dT\S+[ \t]+\[[^\]\r\n]+\][A-Z]:[ \t]*"
+)
+LOG_ENTITIES = sorted({f"LOG_{label}" for label, _ in LOG_RULES} | {"LOG_IP"})
+LOG_ANALYZED_ENTITIES = [entity for entity in REDACT_ENTITIES if entity != "EMAIL_ADDRESS"] + LOG_ENTITIES
+
+
+class LogFieldRecognizer(EntityRecognizer):
+    """Return spans for sensitive values in support logs."""
+
+    def __init__(self):
+        super().__init__(supported_entities=LOG_ENTITIES, supported_language="en")
+
+    def load(self):
+        pass  # The patterns are compiled at module load.
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        results = []
+        for label, rule in LOG_RULES:
+            entity = f"LOG_{label}"
+            if entity not in entities:
+                continue
+            for match in rule.finditer(text):
+                start, end = match.span("value")
+                value = text[start:end]
+                if (value[0], value[-1]) in {('"', '"'), ("'", "'"), ("{", "}")}:
+                    start += 1
+                    end -= 1
+                if start < end and not re.fullmatch(r"\[REDACTED_[A-Z_]+\]", text[start:end]):
+                    results.append(RecognizerResult(entity, start, end, 1.0))
+
+        if "LOG_IP" in entities:
+            for match in IP_CANDIDATE.finditer(text):
+                address = match[0].rstrip(".")
+                try:
+                    ipaddress.ip_address(address)
+                except ValueError:
+                    continue
+                results.append(RecognizerResult("LOG_IP", match.start(), match.start() + len(address), 1.0))
+        return results
+
+
+LOG_OPERATORS = {
+    **ANONYMIZER_OPERATORS,
+    **{
+        entity: OperatorConfig("replace", {"new_value": f"[REDACTED_{entity[4:]}]"})
+        for entity in LOG_ENTITIES
+    },
+}
+
+
+def process_log(source: Path, destination: Path):
+    """Stream a UTF-8 log through the existing Presidio engines."""
+    counts = Counter()
+    temporary_path = None
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"Output already exists: {destination}")
+    try:
+        with source.open(encoding="utf-8", newline="") as input_file:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="", dir=destination.parent,
+                delete=False,
+            ) as output_file:
+                temporary_path = Path(output_file.name)
+                for line in input_file:
+                    if "\x00" in line:
+                        raise ValueError("Expected a UTF-8 text log.")
+                    prefix = LOG_PREFIX.match(line.lstrip("\ufeff"))
+                    start = (1 if line.startswith("\ufeff") else 0) + (prefix.end() if prefix else 0)
+                    end = len(line.rstrip("\r\n"))
+                    message = line[start:end]
+                    if message.strip():
+                        results = ANALYZER.analyze(
+                            text=message,
+                            entities=LOG_ANALYZED_ENTITIES,
+                            language="en",
+                            score_threshold=ANALYZER_THRESHOLD,
+                        )
+                        result = ANONYMIZER.anonymize(
+                            text=message, analyzer_results=results, operators=LOG_OPERATORS,
+                        )
+                        counts.update(item.entity_type.removeprefix("LOG_") for item in result.items)
+                        message = result.text
+                    output_file.write(line[:start] + message + line[end:])
+        destination.hardlink_to(temporary_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return counts
 
 
 def build_presidio():
@@ -190,6 +329,7 @@ def build_presidio():
 
     registry.add_recognizer(InternationalPhoneNumberRecognizer())
     registry.add_recognizer(token_recognizer)
+    registry.add_recognizer(LogFieldRecognizer())
 
     analyzer = AnalyzerEngine(nlp_engine=nlp_engine, registry=registry)
     anonymizer = AnonymizerEngine()
@@ -465,20 +605,28 @@ input_path = Path(INPUT_PATH)
 files = []
 if input_path.is_dir():
     for ext in SUPPORTED_EXTENSIONS:
-        files.extend(input_path.rglob(f"*{ext}"))
+        for candidate in input_path.rglob(f"*{ext}"):
+            if ext == ".log" and Path(OUTPUT_DIR).resolve() in candidate.resolve().parents:
+                continue
+            files.append(candidate)
 elif input_path.suffix.lower() in SUPPORTED_EXTENSIONS:
     files = [input_path]
 else:
     print("Unsupported file or directory.")
     sys.exit(1)
 
+log_failed = False
 for file_path in files:
     file_path = Path(file_path)
     name, ext = file_path.stem, file_path.suffix.lower()
     out_file = Path(OUTPUT_DIR) / f"{name}_redacted{ext}"
     log_file = Path(LOG_DIR) / f"{name}_log.txt"
     try:
-        if ext == ".txt":
+        if ext == ".log":
+            counts = process_log(file_path, out_file)
+            print(", ".join(f"{label}: {count}" for label, count in sorted(counts.items()))
+                  or "No sensitive values detected.")
+        elif ext == ".txt":
             process_txt(file_path, out_file, log_file)
         elif ext == ".csv":
             process_csv(file_path, out_file, log_file)
@@ -490,4 +638,11 @@ for file_path in files:
             process_pdf_to_txt(file_path, out_file, log_file)
         print(f"Redacted: {file_path.name}")
     except Exception as e:
+        if ext == ".log":
+            log_failed = True
+            if isinstance(e, UnicodeError):
+                e = "Expected a UTF-8 text log."
         print(f"Error processing {file_path.name}: {e}")
+
+if log_failed:
+    sys.exit(1)
