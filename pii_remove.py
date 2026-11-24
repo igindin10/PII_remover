@@ -87,7 +87,6 @@ class InternationalPhoneNumberRecognizer(PatternRecognizer):
         return False
 
 
-
 UNICODE_SPACE_MAP = {
     "\u00A0": " ",  # NBSP
     "\u202F": " ",  # NARROW NBSP
@@ -101,6 +100,7 @@ UNICODE_DASH_MAP = {
     "\u2014": "-",  # EM DASH
     "\u2212": "-",  # MINUS SIGN
 }
+
 
 def _normalize_unicode_separators(s: str) -> str:
     # fast path: only do replaces if needed
@@ -126,7 +126,7 @@ REDACT_ENTITIES = [
     # Can be added more as needed
 ]
 
-ANALYZER_THRESHOLD = 0.4
+ANALYZER_THRESHOLD = 0.6
 
 #Anonymizer operators
 ANONYMIZER_OPERATORS = {
@@ -195,11 +195,14 @@ def build_presidio():
     anonymizer = AnonymizerEngine()
     return analyzer, anonymizer
 
+
 ANALYZER, ANONYMIZER = build_presidio()
+
 
 def save_redacted_text(text, output_path):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(text)
+
 
 def is_suspected_name(t: str) -> bool:
     t = t.strip().strip(string.punctuation)
@@ -218,12 +221,14 @@ def is_suspected_name(t: str) -> bool:
         return False
     return True
 
+
 def should_redact_person(span_text: str, left_ctx: str, right_ctx: str) -> bool:
     if CONTEXT_NEG.search(left_ctx) or CONTEXT_NEG.search(right_ctx):
         return False
     if CONTEXT_POS.search(left_ctx) or CONTEXT_POS.search(right_ctx):
         return True
     return is_suspected_name(span_text)
+
 
 def redact_phones_with_validator(text: str, log=None) -> str:
     """
@@ -239,14 +244,14 @@ def redact_phones_with_validator(text: str, log=None) -> str:
 
     # Pass 1: local Israeli numbers (region='IL')
     for m in phonenumbers.PhoneNumberMatcher(
-        text_norm, "IL", leniency=phonenumbers.Leniency.POSSIBLE
+            text_norm, "IL", leniency=phonenumbers.Leniency.POSSIBLE
     ):
         if phonenumbers.is_valid_number(m.number):
             matches.append((m.start, m.end))
 
     # Pass 2: international +country code numbers (region=None)
     for m in phonenumbers.PhoneNumberMatcher(
-        text_norm, None, leniency=phonenumbers.Leniency.POSSIBLE
+            text_norm, None, leniency=phonenumbers.Leniency.POSSIBLE
     ):
         if phonenumbers.is_valid_number(m.number):
             matches.append((m.start, m.end))
@@ -266,7 +271,6 @@ def redact_phones_with_validator(text: str, log=None) -> str:
     out.append(text_norm[last_end:])
 
     return "".join(out)
-
 
 
 def _fallback_redact_e164(text: str, log: list) -> str:
@@ -328,6 +332,7 @@ def redact_text(text: str, log: list) -> str:
 
     return anonymized
 
+
 def process_txt(file_path_txt: Path, out_path: Path, log_path: Path):
     log = []
     with open(file_path_txt, "r", encoding="utf-8", errors="ignore") as f:
@@ -335,6 +340,7 @@ def process_txt(file_path_txt: Path, out_path: Path, log_path: Path):
     redacted = redact_text(text, log)
     save_redacted_text(redacted, out_path)
     write_log(log, log_path)
+
 
 def process_csv(file_path_csv: Path, out_path: Path, log_path: Path):
     def _redact_cell(x, log_list):
@@ -395,6 +401,7 @@ def process_html(file_path_html: Path, out_path: Path, log_path: Path):
         f.write(str(soup))
     write_log(log, log_path)
 
+
 def process_docx(file_path_doc: Path, out_path: Path, log_path: Path):
     log = []
     doc = Document(str(file_path_doc))
@@ -430,6 +437,7 @@ def process_docx(file_path_doc: Path, out_path: Path, log_path: Path):
     doc.save(str(out_path))
     write_log(log, log_path)
 
+
 def process_pdf_to_txt(file_path_pdf: Path, out_path: Path, log_path: Path):
     log = []
     text = extract_text(file_path_pdf)
@@ -437,6 +445,7 @@ def process_pdf_to_txt(file_path_pdf: Path, out_path: Path, log_path: Path):
     out_path = out_path.with_suffix(".txt")
     save_redacted_text(redacted, out_path)
     write_log(log, log_path)
+
 
 def write_log(log_entries, log_path):
     def _mask_for_log(x: str) -> str:
@@ -447,6 +456,7 @@ def write_log(log_entries, log_path):
     with open(log_path, "w", encoding="utf-8") as f:
         for label, value in log_entries:
             f.write(f"{label} => {_mask_for_log(value)}\n")
+
 
 Path(OUTPUT_DIR).mkdir(exist_ok=True)
 Path(LOG_DIR).mkdir(exist_ok=True)
