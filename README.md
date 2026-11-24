@@ -40,8 +40,8 @@ This tool scans and redacts Personally Identifiable Information (PII) from struc
 ## Output
 
 For every input file:
-- `myfile__redacted.csv|.docx|.html|.txt`
-- `myfile__redaction_log.txt` — includes entity types and redacted content
+- `<myfile>_redacted.csv|.docx|.html|.txt|.log`
+- `<myfile>_log.txt` — includes entity types and redacted content
 
 ## Technology Used
 
@@ -67,13 +67,13 @@ source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Download the spaCy model
-python -m spacy download en_core_web_sm
+python -m spacy download en_core_web_lg
 ```
 
 ## Notes
 
-- Model: `en_core_web_sm` (can be upgraded to `en_core_web_trf` for production)
-- Not production-hardened. Designed for Hackathon/demos.
+- Model: `en_core_web_lg`
+- Not production-hardened. Was originally designed for Hackathon/demos.
 - False positives minimized with tech-term filtering logic.
 
 ## Authors
@@ -82,4 +82,4 @@ Maintainer: Igor Gindin
 
 ## License
 
-For internal hackathon/demo purposes only.
+For internal purposes only.

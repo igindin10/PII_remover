@@ -1,3 +1,4 @@
+import argparse
 from collections import Counter
 import hashlib
 import ipaddress
@@ -147,10 +148,34 @@ ANONYMIZER_OPERATORS = {
     "TOKEN": OperatorConfig("replace", {"new_value": "[TOKEN REDACTED]"}),
 }
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Remove PII."
+    )
+    parser.add_argument(
+        "input_path",
+        nargs="?",
+        default=".",
+        help="Input file or directory (default: current directory)",
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        default="redacted",
+        help="Directory for redacted files (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-l", "--log-dir",
+        default="logs",
+        help="Directory for log files (default: %(default)s)",
+    )
+    return parser.parse_args()
+
+args = parse_args()
+
 # === Configuration ===
-INPUT_PATH = sys.argv[1] if len(sys.argv) > 1 else "."
-OUTPUT_DIR = "redacted"
-LOG_DIR = "logs"
+INPUT_PATH = args.input_path
+OUTPUT_DIR = args.output_dir
+LOG_DIR = args.log_dir
 SUPPORTED_EXTENSIONS = [".txt", ".csv", ".html", ".htm", ".docx", "pdf", ".log"]
 
 RE_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
@@ -262,46 +287,6 @@ LOG_OPERATORS = {
         for entity in LOG_ENTITIES
     },
 }
-
-
-def process_log(source: Path, destination: Path):
-    """Stream a UTF-8 log through the existing Presidio engines."""
-    counts = Counter()
-    temporary_path = None
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(f"Output already exists: {destination}")
-    try:
-        with source.open(encoding="utf-8", newline="") as input_file:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", newline="", dir=destination.parent,
-                delete=False,
-            ) as output_file:
-                temporary_path = Path(output_file.name)
-                for line in input_file:
-                    if "\x00" in line:
-                        raise ValueError("Expected a UTF-8 text log.")
-                    prefix = LOG_PREFIX.match(line.lstrip("\ufeff"))
-                    start = (1 if line.startswith("\ufeff") else 0) + (prefix.end() if prefix else 0)
-                    end = len(line.rstrip("\r\n"))
-                    message = line[start:end]
-                    if message.strip():
-                        results = ANALYZER.analyze(
-                            text=message,
-                            entities=LOG_ANALYZED_ENTITIES,
-                            language="en",
-                            score_threshold=ANALYZER_THRESHOLD,
-                        )
-                        result = ANONYMIZER.anonymize(
-                            text=message, analyzer_results=results, operators=LOG_OPERATORS,
-                        )
-                        counts.update(item.entity_type.removeprefix("LOG_") for item in result.items)
-                        message = result.text
-                    output_file.write(line[:start] + message + line[end:])
-        destination.hardlink_to(temporary_path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-    return counts
 
 
 def build_presidio():
@@ -434,6 +419,19 @@ def _fallback_redact_e164(text: str, log: list) -> str:
     return "".join(out)
 
 
+def _redact_with_presidio(text, entities, operators):
+    results = ANALYZER.analyze(
+        text=text,
+        entities=entities,
+        language="en",
+        score_threshold=ANALYZER_THRESHOLD,
+    )
+    anonymized = ANONYMIZER.anonymize(
+        text=text, analyzer_results=results, operators=operators,
+    )
+    return anonymized, results
+
+
 def redact_text(text: str, log: list) -> str:
     def log_and_replace(pattern, replacement, label_name):
         matches = list(pattern.finditer(text))
@@ -450,27 +448,47 @@ def redact_text(text: str, log: list) -> str:
     text = redact_phones_with_validator(text, log=log)
     text = _fallback_redact_e164(text, log)
 
-    #run Presidio analyzer
-    results = ANALYZER.analyze(
-        text=text,
-        entities=REDACT_ENTITIES,
-        language="en",
-        score_threshold=ANALYZER_THRESHOLD,
-    )
-
-    #anonymize with deterministic replacements
-    anonymized = ANONYMIZER.anonymize(
-        text=text,
-        # analyzer_results=filtered,
-        analyzer_results=results,
-        operators=ANONYMIZER_OPERATORS
-    ).text
+    anonymized, results = _redact_with_presidio(text, REDACT_ENTITIES, ANONYMIZER_OPERATORS)
 
     for r in results:
         span = text[r.start:r.end]
         log.append((r.entity_type, span))
 
-    return anonymized
+    return anonymized.text
+
+
+def process_log(source: Path, destination: Path, log_path: Path):
+    """Stream a UTF-8 log through the existing Presidio engines."""
+    counts = Counter()
+    temporary_path = None
+    if source.resolve() == destination.resolve():
+        raise ValueError("Input and output must be different paths.")
+    try:
+        with source.open(encoding="utf-8", newline="") as input_file:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="", dir=destination.parent,
+                delete=False,
+            ) as output_file:
+                temporary_path = Path(output_file.name)
+                for line in input_file:
+                    if "\x00" in line:
+                        raise ValueError("Expected a UTF-8 text log.")
+                    prefix = LOG_PREFIX.match(line.lstrip("\ufeff"))
+                    start = (1 if line.startswith("\ufeff") else 0) + (prefix.end() if prefix else 0)
+                    end = len(line.rstrip("\r\n"))
+                    message = line[start:end]
+                    if message.strip():
+                        result, _ = _redact_with_presidio(
+                            message, LOG_ANALYZED_ENTITIES, LOG_OPERATORS,
+                        )
+                        counts.update(item.entity_type.removeprefix("LOG_") for item in result.items)
+                        message = result.text
+                    output_file.write(line[:start] + message + line[end:])
+        write_log(counts, log_path, counts_only=True)
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def process_txt(file_path_txt: Path, out_path: Path, log_path: Path):
@@ -587,13 +605,20 @@ def process_pdf_to_txt(file_path_pdf: Path, out_path: Path, log_path: Path):
     write_log(log, log_path)
 
 
-def write_log(log_entries, log_path):
+def write_log(log_entries, log_path, *, counts_only=False):
     def _mask_for_log(x: str) -> str:
         h = hashlib.sha256(x.encode("utf-8")).hexdigest()[:8]
         #small preview for debugging only; must be removed if a policy forbids
         return f"<{x[:3]}…#{h}>"
 
     with open(log_path, "w", encoding="utf-8") as f:
+        if counts_only:
+            if not log_entries:
+                f.write("No sensitive values detected.\n")
+            for label, count in sorted(log_entries.items()):
+                f.write(f"{label}: {count}\n")
+            return
+
         for label, value in log_entries:
             f.write(f"{label} => {_mask_for_log(value)}\n")
 
@@ -623,9 +648,7 @@ for file_path in files:
     log_file = Path(LOG_DIR) / f"{name}_log.txt"
     try:
         if ext == ".log":
-            counts = process_log(file_path, out_file)
-            print(", ".join(f"{label}: {count}" for label, count in sorted(counts.items()))
-                  or "No sensitive values detected.")
+            process_log(file_path, out_file, log_file)
         elif ext == ".txt":
             process_txt(file_path, out_file, log_file)
         elif ext == ".csv":
